@@ -1,19 +1,315 @@
-import {Format} from './../util/format';
-import {CameraController} from './CameraController';
-import {MicrophoneController} from './MicrophoneController';
-import {DocumentPreviewController} from './DocumentPreviewController';
+import { Format } from '../util/Format';
+import { CameraController } from './CameraController';
+import { MicrophoneController } from './MicrophoneController';
+import { DocumentPreviewController } from './DocumentPreviewController';
+import { Firebase } from './../util/Firebase';
+import { User } from '../model/User';
+import { Chat } from '../model/Chat';
+import { Message } from '../model/Message';
+import { doc } from 'firebase/firestore';
+import { Base64 } from '../util/base64';
+import { ContactsController } from './ContactsController';
+import { Upload } from '../util/Upload';
 
 export class WhatsAppController {
 
     constructor() {
 
+        this._active = true;
+        this._firebase = new Firebase();
+        this.initAuth();
         this.elementsPrototype();
         this.loadElements();
         this.initEvents();
+        this.checkNotifications();
 
     }
 
-    loadElements(){
+    checkNotifications() {
+
+        if(typeof Notification === 'function'){
+
+            if(Notification.permission !== "granted"){
+
+                this.el.alertNotificationPermission.show();
+
+            } else {
+
+                this.el.alertNotificationPermission.hide();
+
+            }
+
+            this.el.alertNotificationPermission.on('click', e => {
+
+                Notification.requestPermission(permission  => {
+
+                    if(permission === 'granted'){
+
+                        this.el.alertNotificationPermission.hide();
+                        console.info('notificações permitidas!');
+
+                    }
+
+                });
+
+            });
+
+        }
+
+    }
+
+    notification(data) {
+
+        if(Notification.permission === 'granted' && this._active){
+
+            let n = new Notification(this._contactActive.name, {
+
+                icon: this._contactActive.photo,
+                body: data.content
+
+            });
+
+            let sound = new Audio('./audio/alert.mp3');
+            sound.currentTime = 0;
+            sound.play();
+
+            setTimeout(() => {
+
+                if(n) n.close();
+
+            }, 3000)
+
+        }
+
+    }
+
+    initAuth() {
+
+        this._firebase.initAuth()
+            .then(response => {
+
+                this._user = new User(response.user.email);
+
+                this._user.on('datachange', data => {
+
+                    document.querySelector('title').innerHTML = data.name + ' - WhatsApp Clone';
+
+                    this.el.inputNamePanelEditProfile.innerHTML = data.name;
+
+                    if (data.photo) {
+
+                        let photo = this.el.imgPanelEditProfile;
+                        photo.src = data.photo;
+                        photo.show();
+                        this.el.imgDefaultPanelEditProfile.hide();
+
+
+                        let photo2 = this.el.myPhoto.querySelector('img');
+                        photo2.src = data.photo;
+                        photo2.show();
+
+                    }
+
+                    this.initContacts();
+
+                });
+
+                this._user.name = response.user.displayName;
+                this._user.email = response.user.email;
+                this._user.photo = response.user.photoURL;
+
+                this._user.save().then(() => {
+
+                    this.el.appContent.css({
+                        display: 'flex'
+                    });
+
+                });
+
+            })
+            .catch(err => {
+
+                console.error(err);
+
+            });
+
+    }
+
+    initContacts() {
+        
+        this._user.on('contactschange', docs => {
+
+            this.el.contactsMessagesList.innerHTML = '';
+
+            docs.forEach(doc => {
+
+                let contact = doc.data();
+
+                let div = document.createElement('div');
+
+                div.innerHTML = `
+                    <div class="contact-item">
+                    </div>
+                `;
+
+                if(contact.photo) {
+
+                    let img = div.querySelector('.photo');
+                    img.src = contact.photo;
+                    img.show();
+
+                }
+
+                div.on('click', e => {
+
+                    this.setActiveChat(contact);
+                   
+                })
+
+                this.el.contactsMessagesList.appendChild(div);
+
+            })
+
+        });
+        
+        this._user.getContacts();
+
+    }
+
+    setActiveChat(contact){
+
+        if(this._contactActive) {
+
+            Message.getRef(this._contactActive.chatId).onSnapshot(() => {});
+
+        }
+
+        this._contactActive = contact;
+
+        this.el.activeName.innerHTML = contact.name;
+        this.el.activeStatus = contact.status;
+
+        if(contact.photo) {
+
+            let img = this.el.activePhoto;
+            img.src = contact.photo;
+            img.show();
+        }
+
+        this.el.home.hide();
+        this.el.main.css({
+            display: 'flex'
+        });
+
+        this.el.panelMessagesContainer.innerHTML = '';
+
+        this._messagesReceived = [];
+
+        Message.getRef(this._contactActive.chatId).orderBy('timeStamp')
+        .onSnapshot(docs => {
+
+            let scrollTop = this.el.panelMessagesContainer.scrollTop;
+            let scrollTopMax = (this.el.panelMessagesContainer.scrollHeight - this.el.panelMessagesContainer.offsetHeight);
+            let autoScroll = (scrollTop >= scrollTopMax);
+
+            docs.forEach(doc => {
+
+                let data = doc.data();
+                data.id = doc.id;
+
+                let message = new Message();
+
+                message.fromJSON(data);
+
+                let me = (data.from === this._user.email);
+
+                if(!me && this._messagesReceived.filter(id => { return (id === data.id) }).length === 0){
+                  
+                    this.notification(data);
+                    this._messagesReceived.push(data.id);
+
+                }
+
+                let view = message.getViewElement(me);
+
+                if(!this.el.panelMessagesContainer.querySelector('#_' + data.id)){
+
+                    if(!me) {
+
+                        doc.ref.set({
+
+                            status: 'read'
+                        }, {
+
+                            merge: true
+
+                        });
+                    }
+    
+                    this.el.panelMessagesContainer.appendChild(view);
+
+                } else {
+
+                    let parent = this.el.panelMessagesContainer.querySelector('#_' + data.id).parentNode;
+
+                    parent.replaceChild(view, this.el.panelMessagesContainer.querySelector('#_' + data.id));
+
+                }
+
+                if(this.el.panelMessagesContainer.querySelector('#_' + data.id) && me) {
+
+                   let msgEl = this.el.panelMessagesContainer.querySelector('#_' + data.id);
+
+                   msgEl.querySelector('.message-status').innerHTML = message.getStatusViewElement().outerHTML;
+
+                }
+
+                if(message.type === 'contact'){
+
+                    view.querySelector('.btn-message-send').on('click', e => {
+
+                        Chat.createNotExists(this._user.email, message.content.email).then(chat => {
+
+                            let contact = new User(message.content.email);
+
+                            contact.on('datachange', data => {
+
+                                contact.chatId = chat.id;
+
+                                this._user.addContact(contact);
+    
+                                this._user.chatId = chat.id;
+        
+                                contact.addContact(this._user);
+
+                                this.setActiveChat(contact);
+                            
+                            });
+
+    
+                        });
+
+                    })
+
+                }
+
+            });
+
+            if(autoScroll){
+
+                this.el.panelMessagesContainer.scrollTop = (this.el.panelMessagesContainer.scrollHeight - this.el.panelMessagesContainer.offsetHeight);
+
+            } else {
+
+                this.el.panelMessagesContainer.scrollTop = scrollTop;
+
+            }
+
+        });
+
+    }
+
+    loadElements() {
 
         this.el = [];
 
@@ -26,28 +322,28 @@ export class WhatsAppController {
 
     elementsPrototype() {
 
-        Element.prototype.hide = function() {
+        Element.prototype.hide = function () {
 
             this.style.display = 'none';
             return this;
 
         }
 
-        Element.prototype.show = function() {
+        Element.prototype.show = function () {
 
             this.style.display = 'block';
             return this;
 
         }
 
-        Element.prototype.toggle = function() {
+        Element.prototype.toggle = function () {
 
             this.style.display = (this.style.display === 'none') ? 'block' : 'none';
             return this;
 
         }
 
-        Element.prototype.on = function(events, fn) {
+        Element.prototype.on = function (events, fn) {
 
             events.split(' ').forEach(event => {
 
@@ -59,9 +355,9 @@ export class WhatsAppController {
 
         }
 
-        Element.prototype.css = function(styles) {
+        Element.prototype.css = function (styles) {
 
-            for(let name in styles) {
+            for (let name in styles) {
                 this.style[name] = styles[name]
             };
 
@@ -69,32 +365,32 @@ export class WhatsAppController {
 
         }
 
-        Element.prototype.addClass = function(name) {
+        Element.prototype.addClass = function (name) {
             this.classList.add(name);
             return this;
         }
 
-        Element.prototype.removeClass = function(name) {
+        Element.prototype.removeClass = function (name) {
             this.classList.remove(name);
             return this;
         }
 
-        Element.prototype.toggleClass = function(name) {
+        Element.prototype.toggleClass = function (name) {
             this.classList.toggle(name);
             return this;
         }
 
-        Element.prototype.hasClass = function(name) {
+        Element.prototype.hasClass = function (name) {
             return this.classList.contains(name);
         }
 
-        HTMLFormElement.prototype.getForm = function() {
+        HTMLFormElement.prototype.getForm = function () {
 
             return new FormData(this);
 
         }
 
-        HTMLFormElement.prototype.toJson = function() {
+        HTMLFormElement.prototype.toJson = function () {
 
             let json = {};
 
@@ -112,11 +408,39 @@ export class WhatsAppController {
 
     initEvents() {
 
+        window.addEventListener('focus', e => {
+
+            this._active = true;
+
+        });
+
+        window.addEventListener('blur', e => {
+
+            this._active = false;
+            
+        });
+
+        this.el.inputSearchContacts.on('keyup', e => {
+
+            if(this.el.inputSearchContacts.value.length > 0){
+
+                this.el.inputSearchContactsPlaceholder.hide();
+                
+            } else {
+
+                this.el.inputSearchContactsPlaceholder.show();
+
+            }
+
+            this._user.getContacts(this.el.inputSearchContacts.value);
+
+        })
+
         this.el.myPhoto.on('click', e => {
 
             this.closeAllLeftPanel();
             this.el.panelEditProfile.show();
-            setTimeout(() =>{
+            setTimeout(() => {
 
                 this.el.panelEditProfile.addClass('open');
 
@@ -129,12 +453,12 @@ export class WhatsAppController {
             this.closeAllLeftPanel();
             this.el.panelAddContact.show();
 
-            setTimeout(() =>{
+            setTimeout(() => {
 
                 this.el.panelAddContact.addClass('open');
 
             }, 300);
-              
+
         });
 
         this.el.btnClosePanelEditProfile.on('click', e => {
@@ -149,14 +473,33 @@ export class WhatsAppController {
 
         });
 
-        this.el.photoContainerEditProfile.on('click', e =>{
+        this.el.photoContainerEditProfile.on('click', e => {
 
             this.el.inputProfilePhoto.click();
 
         });
 
+        this.el.inputProfilePhoto.on('change', e => {
+
+            if(this.el.inputProfilePhoto.files.length > 0){
+
+                let file = this.el.inputProfilePhoto.files[0];
+
+                Upload.send(file, this._user.email).then(snapshot => {
+
+                    this._user.photo = snapshot.downloadURL;
+                    this._user.save().then(() => {
+                        this.el.btnClosePanelEditProfile.click();
+                    });
+
+                });
+
+            }
+
+        })
+
         this.el.inputNamePanelEditProfile.on('keypress', e => {
-            if(e.key === 'Enter') {
+            if (e.key === 'Enter') {
                 e.preventDefault();
 
                 this.el.btnSavePanelEditProfile.click();
@@ -164,9 +507,17 @@ export class WhatsAppController {
             }
         });
 
-        this.el.btnSavePanelEditProfile.on('click', e =>{
+        this.el.btnSavePanelEditProfile.on('click', e => {
 
-            console.log(this.el.inputNamePanelEditProfile.innerHTML);
+            this.el.at.btnSavePanelEditProfile.disabled = true;
+
+            this._user.name = this.el.inputNamePanelEditProfile.innerHTML;
+
+            this._user.save().then(() => {
+
+                this.el.at.btnSavePanelEditProfile.disabled = false;
+
+            });
 
         });
 
@@ -175,6 +526,39 @@ export class WhatsAppController {
             e.preventDefault();
 
             let formData = new FormData(this.el.formPanelAddContact);
+
+            let contact = new User(formData.get('email'));
+
+            contact.on('datachange', data => {
+
+                if(data.name) {
+
+                    Chat.createNotExists(this._user.email, contact.email).then(chat => {
+
+                        contact.chatId = chat.id;
+
+                        this._user.chatId = chat.id;
+
+                        contact.addContact(this._user);
+                        
+                        this._user.addContact(contact).then(() => {
+
+                            this.el.btnClosePanelAddContact.click();
+                            console.info('Contato foi adicionado');
+
+                        });
+
+                    });
+
+                }else {
+
+                    console.error('Usuário não foi encontrado')
+
+                }
+
+            })
+
+            this._user.addContact();
 
         });
 
@@ -208,11 +592,9 @@ export class WhatsAppController {
 
         this.el.inputPhoto.on('change', e => {
 
-            console.log(this.el.inputPhoto.files);
-
             [...this.el.inputPhoto.files].forEach(file => {
-
-                console.log(file);
+                
+                Message.sendImage(this._contactActive.chatId, this._user.email, file);
 
             });
 
@@ -223,7 +605,7 @@ export class WhatsAppController {
             this.closeAllMainPanel();
             this.el.panelCamera.addClass('open');
             this.el.panelCamera.css({
-                'height' : 'calc(100% - 120px)'
+                'height': 'calc(100% - 120px)'
             });
 
             this._camera = new CameraController(this.el.videoCamera);
@@ -263,7 +645,50 @@ export class WhatsAppController {
 
         this.el.btnSendPicture.on('click', e => {
 
-            console.log(this.el.pictureCamera.src);
+            this.el.btnSendPicture.disabled = true;
+
+            let regex = /^data:(.+);base64,(.*)$/;
+            let result = this.el.pictureCamera.src.match(regex);
+            let mimeType = result[1];
+            let ext = mimeType.split('/')[1];
+            let filename = `camera${Date.now()}.${ext}`;
+
+            let picture = new Image();
+            picture.src = this.el.pictureCamera.src;
+            picture.onload = e => {
+
+                let canvas = document.createElement('canvas');
+                let context = canvas.getContext('2d');
+
+                canvas.width = picture.width;
+                canvas.height = picture.height;
+
+                context.translate(picture.width, 0);
+                context.scale(-1, 1);
+
+                context.drawImage(picture, 0, 0, canvas.width, canvas.height);
+
+                fetch(canvas.toDataURL('mimeType'))
+                .then(res => { return res.arrayBuffer(); })
+                .then(buffer => { return new File([buffer], filename, { type : mimeType}); })
+                .then(file => {
+
+                    Message.sendImage(this._contactActive.chatId, this._user.email, file);
+
+                    this.el.btnSendPicture.disabled = false;
+
+                    this.closeAllMainPanel();
+                    this._camera.stop();
+                    this.el.btnReshootPanelCamera.hide();
+                    this.el.pictureCamera.hide();
+                    this.el.videoCamera.show();
+                    this.el.containerSendPicture.hide();
+                    this.el.containerTakePicture.show();
+                    this.el.panelMessagesContainer.show();
+
+                });
+
+            };
 
         });
 
@@ -272,7 +697,7 @@ export class WhatsAppController {
             this.closeAllMainPanel();
             this.el.panelDocumentPreview.addClass('open');
             this.el.panelDocumentPreview.css({
-                'height' : 'calc(100% - 120px)'
+                'height': 'calc(100% - 120px)'
             });
 
             this.el.inputDocument.click();
@@ -281,11 +706,11 @@ export class WhatsAppController {
 
         this.el.inputDocument.on('change', e => {
 
-            if(this.el.inputDocument.files.length) {
-                
+            if (this.el.inputDocument.files.length) {
+
 
                 this.el.panelDocumentPreview.css({
-                    'height' : '1%)'
+                    'height': '1%)'
                 });
 
                 let file = this.el.inputDocument.files[0];
@@ -300,33 +725,33 @@ export class WhatsAppController {
                     this.el.filePanelDocumentPreview.hide();
 
                     this.el.panelDocumentPreview.css({
-                        'height' : 'calc(100% - 120px)'
+                        'height': 'calc(100% - 120px)'
                     });
 
                 }).catch(err => {
 
                     this.el.panelDocumentPreview.css({
-                        'height' : 'calc(100% - 120px)'
+                        'height': 'calc(100% - 120px)'
                     });
-                    
-                    switch(file.type) {
+
+                    switch (file.type) {
 
                         case 'application/vnd.ms-excel':
                         case 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
                             this.el.iconPanelDocumentPreview.className = 'jcxhw icon-doc-xls';
-                        break;
+                            break;
 
                         case 'application/vnd.ms-powerpoint':
                         case 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
                             this.el.iconPanelDocumentPreview.className = 'jcxhw icon-doc-ppt';
-                        break;
+                            break;
 
                         case 'application/msword':
                         case 'application/vnd.openxmlformats-officedocument.wordprecessingml.document':
                             this.el.iconPanelDocumentPreview.className = 'jcxhw icon-doc-doc';
                         default:
                             this.el.iconPanelDocumentPreview.className = 'jcxhw icon-doc-generic';
-                        break;
+                            break;
                     }
 
                     this.el.filenamePanelDocumentPreview.innerHTML = file.name;
@@ -346,20 +771,52 @@ export class WhatsAppController {
 
         this.el.btnSendDocument.on('click', e => {
 
-            console.log('send document');
+            let file = this.el.inputDocument.files[0];
+            let base64 = this.el.imgPanelDocumentPreview.src;
+
+            if(file.type === 'application/pdf'){
+
+                Base64.toFile(base64).then(filePreview => {
+
+                    Message.sendDocument(
+                        this._contactActive.chatId, 
+                        this._user.email, file, filePreview, this.el.infoPanelDocumentPreview.innerHTML);
+
+                })
+
+            } else {
+
+                Message.sendDocument(
+                    this._contactActive.chatId, 
+                    this._user.email, file);
+
+            }
+
+            this.el.btnClosePanelDocumentPrevie.click();
 
         });
 
         this.el.btnAttachContact.on('click', e => {
 
+            this._contactsController = new ContactsController(this._contactsController, this._user);
 
-            this.el.modalContacts.show();
+            this._contactsController.on('select', contact => {
+
+                Message.sendContact(
+                    this._contactActive.chatId,
+                    this._user.email,
+                    contact
+                )
+
+            })
+
+            this._contactsController.open();
 
         });
 
         this.el.btnCloseModalContacts.on('click', e => {
-            
-            this.el.modalContacts.hide()
+
+            this._contactsController.close();
 
         });
 
@@ -367,29 +824,54 @@ export class WhatsAppController {
 
             this.el.recordMicrophone.show();
             this.el.btnSendMicrophone.hide();
-            this.startRecordMicrophoneTime();
 
             this._microphoneController = new MicrophoneController();
+
+            this._microphoneController.on('ready', audio => {
+
+                console.log('ready event');
+
+                this._microphoneController.startRecorder();
+
+            });
+
+            this._microphoneController.on('recordtimer', timer => {
+
+                this.el.recordMicrophoneTimer.innerHTML = Format.toTime(timer);
+
+            })
 
         });
 
         this.el.btnCancelMicrophone.on('click', e => {
 
-            this._microphoneController.stop();
+            this._microphoneController.stopRecorder();
             this.closeRecordMicrophone();
 
         });
 
         this.el.btnFinishMicrophone.on('click', e => {
 
-            this._microphoneController.stop();
+            this._microphoneController.on('recorded', (file, metadata) => {
+
+                Message.sendAudio(
+                    this._contactActive.chatId,
+                    this._user.email,
+                    file,
+                    metadata,
+                    this._user.photo
+                );
+
+            })
+
+            this._microphoneController.stopRecorder();
             this.closeRecordMicrophone();
 
         });
 
         this.el.inputText.on('keypress', e => {
 
-            if(e.key === 'Enter' && !e.ctrlKey) {
+            if (e.key === 'Enter' && !e.ctrlKey) {
 
                 e.preventDefault();
                 this.el.btnSend.click();
@@ -400,13 +882,13 @@ export class WhatsAppController {
 
         this.el.inputText.on('keyup', e => {
 
-            if(this.el.inputText.innerHTML.length) {
+            if (this.el.inputText.innerHTML.length) {
 
                 this.el.inputPlaceholder.hide();
                 this.el.btnSendMicrophone.hide();
                 this.el.btnSend.show();
 
-            }else {
+            } else {
 
                 this.el.inputPlaceholder.show();
                 this.el.btnSendMicrophone.show();
@@ -418,7 +900,15 @@ export class WhatsAppController {
 
         this.el.btnSend.on('click', e => {
 
-            console.log(this.el.inputText.innerHTML)
+            Message.send(
+                this._contactActive.chatId, 
+                this._user.email,
+                'text',
+                this.el.inputText.innerHTML
+            );
+            
+            this.el.inputText.innerHTML = '';
+            this.el.panelEmojis.removeClass('open');
 
         });
 
@@ -446,7 +936,7 @@ export class WhatsAppController {
 
                 let cursor = window.getSelection();
 
-                if(!cursor.focusNode || !cursor.focusNode.id == 'input-text'){
+                if (!cursor.focusNode || !cursor.focusNode.id == 'input-text') {
 
                     this.el.inputText.focus();
                     cursor = window.getSelection();
@@ -472,20 +962,6 @@ export class WhatsAppController {
 
         });
     }
-
-    startRecordMicrophoneTime(){
-
-        let start = Date.now();
-
-        this._recordMicrophoneInterval = setInterval(() => {
-
-            this.el.recordMicrophoneTimer.innerHTML = Format.toTime((Date.now() - start));
-
-        }, 100);
-        
-
-    }
-
 
     closeRecordMicrophone() {
 
